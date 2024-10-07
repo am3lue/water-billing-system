@@ -2,13 +2,16 @@
 #include <MFRC522.h>
 #include <EEPROM.h>
 
-#define SS_PIN 10  // RFID Reader SDA
-#define RST_PIN 9  // RFID Reader RST
-#define valvePin 3  // Pin to control the water valve (relay)
+#define SS_PIN_1 10  // RFID Reader 1 SDA
+#define RST_PIN_1 9  // RFID Reader 1 RST
+#define SS_PIN_2 8   // RFID Reader 2 SDA
+#define RST_PIN_2 7  // RFID Reader 2 RST
 
-MFRC522 rfid(SS_PIN, RST_PIN);  // Instance for RFID Reader
+MFRC522 rfid1(SS_PIN_1, RST_PIN_1);  // Instance for RFID Reader 1
+MFRC522 rfid2(SS_PIN_2, RST_PIN_2);  // Instance for RFID Reader 2
 
 int balanceAddressBase = 0;  // EEPROM base address for balance storage
+int valvePin = 8;  // Pin to control the water valve (relay)
 int initialBalance = 1000;  // Initial balance for all cards
 
 unsigned long lastTime = 0;
@@ -17,23 +20,30 @@ const unsigned long dispenseInterval = 1000;  // 1 second interval for balance d
 void setup() {
   Serial.begin(9600);
   SPI.begin();  // Initialize SPI bus
-  rfid.PCD_Init();  // Initialize RFID Reader
+  rfid1.PCD_Init();  // Initialize RFID Reader 1
+  rfid2.PCD_Init();  // Initialize RFID Reader 2
   pinMode(valvePin, OUTPUT);
   digitalWrite(valvePin, LOW);  // Ensure the valve is off by default
 
-  Serial.println("Place your card on the reader...");
+  Serial.println("Place your card on a reader...");
 }
 
 void loop() {
-  // Check for a card on the RFID reader
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    handleCard(rfid.uid.uidByte, rfid.uid.size);
-    rfid.PICC_HaltA();  // Stop reading
+  // Check for a card on Reader 1
+  if (rfid1.PICC_IsNewCardPresent() && rfid1.PICC_ReadCardSerial()) {
+    handleCard(rfid1.uid.uidByte, rfid1.uid.size, "Reader 1", rfid1);
+    rfid1.PICC_HaltA();  // Stop reading
+  }
+
+  // Check for a card on Reader 2
+  if (rfid2.PICC_IsNewCardPresent() && rfid2.PICC_ReadCardSerial()) {
+    handleCard(rfid2.uid.uidByte, rfid2.uid.size, "Reader 2", rfid2);
+    rfid2.PICC_HaltA();  // Stop reading
   }
 }
 
-void handleCard(byte *uid, byte size) {
-  Serial.print("Card UID: ");
+void handleCard(byte *uid, byte size, String readerName, MFRC522 &rfidReader) {
+  Serial.print(readerName + ": Card UID: ");
   String cardUid = "";
   for (byte i = 0; i < size; i++) {
     Serial.print(uid[i], HEX);
@@ -66,11 +76,11 @@ void handleCard(byte *uid, byte size) {
         lastTime = currentTime;
         Serial.print("Remaining Balance: ");
         Serial.println(balance);
-        delay(1000);
+        delay (1000);
       }
 
       // Check if the card is still present
-      if (!cardIsStillPresent()) {
+      if (!cardIsStillPresent(rfidReader)) {
         Serial.println("Card removed. Stopping water.");
         break;  // Stop dispensing water if the card is removed
       }
@@ -84,8 +94,8 @@ void handleCard(byte *uid, byte size) {
 }
 
 // Function to check if the card is still present
-bool cardIsStillPresent() {
-  return rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial();
+bool cardIsStillPresent(MFRC522 &rfidReader) {
+  return rfidReader.PICC_IsNewCardPresent() && rfidReader.PICC_ReadCardSerial();
 }
 
 int getCardIndex(byte *uid, byte size) {
