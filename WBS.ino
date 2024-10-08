@@ -1,125 +1,305 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <EEPROM.h>
 
-#define SS_PIN_1 10  // RFID Reader 1 SDA
-#define RST_PIN_1 9  // RFID Reader 1 RST
-#define SS_PIN_2 8   // RFID Reader 2 SDA
-#define RST_PIN_2 7  // RFID Reader 2 RST
+#define SS_PIN 3    // RFID Reader SDA (GPIO 5)
+#define RST_PIN 4   // RFID Reader RST (GPIO 4)
+#define VALVE_PIN 2 // Pin to control the water valve (relay)
 
-MFRC522 rfid1(SS_PIN_1, RST_PIN_1);  // Instance for RFID Reader 1
-MFRC522 rfid2(SS_PIN_2, RST_PIN_2);  // Instance for RFID Reader 2
+MFRC522 rfid(SS_PIN, RST_PIN);  // Create MFRC522 instance for RFID Reader
 
-int balanceAddressBase = 0;  // EEPROM base address for balance storage
-int valvePin = 8;  // Pin to control the water valve (relay)
-int initialBalance = 1000;  // Initial balance for all cards
+// Wi-Fi credentials
+const char* ssid = "ARUSHA_SCIENCE";
+const char* password = "science2022";
 
-unsigned long lastTime = 0;
-const unsigned long dispenseInterval = 1000;  // 1 second interval for balance deduction
+const int initialBalance = 1000;  // Default balance for all new cards
+const unsigned long dispenseInterval = 1000;  // 1-second interval for balance deduction
+unsigned long lastDispenseTime = 0;
+
+ESP8266WebServer server(8000);  // Create a server at port 80
+
+// Define EEPROM locations for two cards
+#define CARD_1_UID_ADDR 0
+#define CARD_1_BALANCE_ADDR (CARD_1_UID_ADDR + 4) // UID is 4 bytes
+#define CARD_2_UID_ADDR (CARD_1_BALANCE_ADDR + sizeof(int))
+#define CARD_2_BALANCE_ADDR (CARD_2_UID_ADDR + 4)
 
 void setup() {
   Serial.begin(9600);
-  SPI.begin();  // Initialize SPI bus
-  rfid1.PCD_Init();  // Initialize RFID Reader 1
-  rfid2.PCD_Init();  // Initialize RFID Reader 2
-  pinMode(valvePin, OUTPUT);
-  digitalWrite(valvePin, LOW);  // Ensure the valve is off by default
 
-  Serial.println("Place your card on a reader...");
+  // Initialize EEPROM (size is sufficient for two cards)
+  EEPROM.begin(512);
+
+  // Initialize RFID reader
+  SPI.begin();  
+  rfid.PCD_Init();
+
+  // Set valve pin as output
+  pinMode(VALVE_PIN, OUTPUT);
+  digitalWrite(VALVE_PIN, LOW);  // Ensure the valve is off initially
+
+  // Connect to Wi-Fi
+  connectToWiFi();
+
+  // Start the server
+  server.on("/", handleRoot);
+  server.on("/update", handleUpdate);
+  server.begin();
+  Serial.println("Server started.");
 }
 
 void loop() {
-  // Check for a card on Reader 1
-  if (rfid1.PICC_IsNewCardPresent() && rfid1.PICC_ReadCardSerial()) {
-    handleCard(rfid1.uid.uidByte, rfid1.uid.size, "Reader 1", rfid1);
-    rfid1.PICC_HaltA();  // Stop reading
-  }
+  server.handleClient();
 
-  // Check for a card on Reader 2
-  if (rfid2.PICC_IsNewCardPresent() && rfid2.PICC_ReadCardSerial()) {
-    handleCard(rfid2.uid.uidByte, rfid2.uid.size, "Reader 2", rfid2);
-    rfid2.PICC_HaltA();  // Stop reading
+  // Check for RFID card presence and handle water dispensing
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String cardUid = getCardUID(rfid.uid.uidByte, rfid.uid.size);
+    Serial.print("Card UID: ");
+    Serial.println(cardUid);
+    handleWaterDispensing(cardUid);
+    rfid.PICC_HaltA();  // Stop reading card
   }
 }
 
-void handleCard(byte *uid, byte size, String readerName, MFRC522 &rfidReader) {
-  Serial.print(readerName + ": Card UID: ");
-  String cardUid = "";
-  for (byte i = 0; i < size; i++) {
-    Serial.print(uid[i], HEX);
-    cardUid += String(uid[i], HEX);  // Generate UID string
-  }
-  Serial.println();
+// Connect to Wi-Fi
+void connectToWiFi() {
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
 
-  // Retrieve the balance for this card, initializing if it's the first time
-  int balance = retrieveCardBalance(uid, size);
-  if (balance == -1) {  // Balance is not set yet (initial state)
-    balance = initialBalance;  // Set initial balance
-    storeCardBalance(uid, size, balance);  // Store the initial balance
-    Serial.println("Initial balance set to 1000.");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
   }
 
-  Serial.print("Current Balance: ");
+  Serial.println("");
+  Serial.println("Wi-Fi connected.");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// Handle the root page
+void handleRoot() {
+  String html = R"=====(
+    <!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Water Billing System</title>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #f2f2f2;
+      font-family: Arial, sans-serif;
+    }
+    .container {
+      width: 80%;
+      max-width: 400px;
+      padding: 20px;
+      background-color: #fff;
+      box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+    }
+    .input-container {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+    input[type="number"] {
+      width: 80%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 16px;
+    }
+    input[type="text"] {
+      width: 80%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 16px;
+    }
+    .balance-container {
+      text-align: left;
+    }
+    input[type="submit"] {
+      width: 100%;
+      padding: 10px;
+      background-color: #2238a3;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    input[type="submit"]:hover {
+      background-color: #3492eb;
+    }
+  </style>
+</head>
+<body>
+  
+
+  <div class="container">
+<h1>Water Billing System Refilling Form</h1>
+    <div class="input-container">
+      <label for="card-id">Card ID:</label>
+      <input type="number" id="card-id" name="card-id">
+    </div>
+    <div class="input-container">
+      <label for="token">Token:</label>
+      <input type="text" id="token" name="token">
+    </div>
+    <div class="input-container balance-container">
+      <label for="balance">Balance:</label>
+      <input type="number" id="balance" name="balance">
+    </div>
+    <input type="submit" value="Submit">
+  </div>
+</body>
+</html>
+
+  )=====";
+  server.send(200, "text/html", html);
+}
+
+// Handle balance update
+void handleUpdate() {
+  if (server.hasArg("uid") && server.hasArg("balance")) {
+    String cardUid = server.arg("uid");
+    int newBalance = server.arg("balance").toInt();
+
+    updateBalance(cardUid, newBalance);
+
+    server.send(200, "text/html", "<html><body>Balance updated successfully!</body></html>");
+
+    Serial.println("Balance updated via Wi-Fi.");
+  } else {
+    server.send(400, "text/html", "<html><body>Invalid parameters.</body></html>");
+  }
+}
+
+// Handle RFID card detection and water dispensing
+void handleWaterDispensing(String cardUid) {
+  int balance = getBalance(cardUid);
+
+  if (balance == -1) {
+    balance = initialBalance;
+    updateBalance(cardUid, balance);
+    Serial.println("New card detected. Initial balance set to 1000.");
+  }
+
+  Serial.print("Current balance: ");
   Serial.println(balance);
 
-  // Start dispensing water if balance > 0
   if (balance > 0) {
-    digitalWrite(valvePin, HIGH);  // Turn on the valve
     Serial.println("Water dispensing...");
+    digitalWrite(VALVE_PIN, HIGH);
 
-    // Continue dispensing until balance runs out or card is removed
     while (balance > 0) {
       unsigned long currentTime = millis();
-      if (currentTime - lastTime >= dispenseInterval) {
-        balance--;  // Deduct 1 unit of balance per second
-        storeCardBalance(uid, size, balance);  // Update balance in EEPROM
-        lastTime = currentTime;
-        Serial.print("Remaining Balance: ");
+      if (currentTime - lastDispenseTime >= dispenseInterval) {
+        balance--;
+        updateBalance(cardUid, balance);
+        lastDispenseTime = currentTime;
+
+        Serial.print("Remaining balance: ");
         Serial.println(balance);
-        delay (1000);
       }
 
-      // Check if the card is still present
-      if (!cardIsStillPresent(rfidReader)) {
+      if (!isCardStillPresent()) {
         Serial.println("Card removed. Stopping water.");
-        break;  // Stop dispensing water if the card is removed
+        break;
       }
     }
 
-    digitalWrite(valvePin, LOW);  // Turn off the valve when done
+    digitalWrite(VALVE_PIN, LOW);
     Serial.println("Water stopped.");
   } else {
     Serial.println("Insufficient balance.");
   }
 }
 
-// Function to check if the card is still present
-bool cardIsStillPresent(MFRC522 &rfidReader) {
-  return rfidReader.PICC_IsNewCardPresent() && rfidReader.PICC_ReadCardSerial();
+// Check if card is still present
+bool isCardStillPresent() {
+  return rfid.PICC_IsNewCardPresent();
 }
 
-int getCardIndex(byte *uid, byte size) {
-  // Hashing based on the UID to return a unique index (for 5 cards)
-  int hash = 0;
+// Retrieve the card UID as a string
+String getCardUID(byte *uid, byte size) {
+  String cardUid = "";
   for (byte i = 0; i < size; i++) {
-    hash += uid[i];
+    if (uid[i] < 0x10) {
+      cardUid += "0";
+    }
+    cardUid += String(uid[i], HEX);
   }
-  return hash % 5;  // Assume 5 cards maximum
+  cardUid.toUpperCase();
+  return cardUid;
 }
 
-void storeCardBalance(byte *uid, byte size, int balance) {
-  int cardIndex = getCardIndex(uid, size);
-  int address = balanceAddressBase + cardIndex * sizeof(int);
-  EEPROM.put(address, balance);
+// Retrieve the card's balance from EEPROM
+int getBalance(String cardUid) {
+  if (cardUid == readCardUID(CARD_1_UID_ADDR)) {
+    return EEPROM.read(CARD_1_BALANCE_ADDR);
+  } else if (cardUid == readCardUID(CARD_2_UID_ADDR)) {
+    return EEPROM.read(CARD_2_BALANCE_ADDR);
+  }
+  return -1; // Card not found
 }
 
-int retrieveCardBalance(byte *uid, byte size) {
-  int cardIndex = getCardIndex(uid, size);
-  int address = balanceAddressBase + cardIndex * sizeof(int);
-  int balance;
-  EEPROM.get(address, balance);
-  if (balance < 0 || balance > 100000) {  // Invalid balance, assume it's uninitialized
-    return -1;  // Return -1 to signal that balance is uninitialized
+// Update the balance of the card in EEPROM
+void updateBalance(String cardUid, int balance) {
+  if (cardUid == readCardUID(CARD_1_UID_ADDR)) {
+    EEPROM.put(CARD_1_BALANCE_ADDR, balance);
+  } else if (cardUid == readCardUID(CARD_2_UID_ADDR)) {
+    EEPROM.put(CARD_2_BALANCE_ADDR, balance);
+  } else {
+    // New card: if empty slot, store in first available slot
+    if (readCardUID(CARD_1_UID_ADDR) == "") {
+      writeCardUID(CARD_1_UID_ADDR, cardUid);
+      EEPROM.put(CARD_1_BALANCE_ADDR, balance);
+    } else if (readCardUID(CARD_2_UID_ADDR) == "") {
+      writeCardUID(CARD_2_UID_ADDR, cardUid);
+      EEPROM.put(CARD_2_BALANCE_ADDR, balance);
+    } else {
+      Serial.println("No available slots for new cards.");
+    }
   }
-  return balance;
+  EEPROM.commit();
+  Serial.print("Balance updated: ");
+  Serial.println(balance);
+}
+
+// Read card UID from EEPROM
+String readCardUID(int addr) {
+  String uid = "";
+  for (int i = 0; i < 4; i++) {
+    byte b = EEPROM.read(addr + i);
+    if (b == 0xFF) return ""; // Empty slot
+    if (b < 0x10) {
+      uid += "0";
+    }
+    uid += String(b, HEX);
+  }
+  uid.toUpperCase();
+  return uid;
+}
+
+// Write card UID to EEPROM
+void writeCardUID(int addr, String cardUid) {
+  for (int i = 0; i < 4; i++) {
+    byte uidByte = strtoul(cardUid.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+    EEPROM.write(addr + i, uidByte);
+  }
 }
