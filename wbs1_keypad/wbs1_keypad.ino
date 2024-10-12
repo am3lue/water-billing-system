@@ -1,3 +1,4 @@
+
 /*
  * Ultrasonic Simple
  * Prints the distance read by an ultrasonic sensor in
@@ -46,6 +47,8 @@ float volume;
 #include <LiquidCrystal_I2C.h>
 LiquidCrystal_I2C lcd(0x27, 16, 4);
 
+// init for buzzer
+#define buzzer 2
 
 void setup() {
 
@@ -55,6 +58,7 @@ void setup() {
   lcd.clear();
 
   Serial.begin(9600);
+  pinMode(buzzer, OUTPUT);
 }
 
 void loop() {
@@ -74,9 +78,11 @@ void loop() {
 
   if (percentvol > 75){
     print("Maji yanatosha");
+    noTone(buzzer);
   }
   else if (percentvol <= 75){
     print("maji Hayatoshi");
+    tone(buzzer, 2550);
   }
   }
 }
